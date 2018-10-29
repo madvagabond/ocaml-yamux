@@ -1,0 +1,11 @@
+# -*- mode: gitignore; -*-
+*~
+\#*\#
+.\#*
+
+/_build/*
+
+*.install
+*/.merlin
+*.swp 
+

@@ -1,0 +1,19 @@
+opam-version: "1.2"
+maintainer: ""
+authors: []
+tags: []
+license: ""
+homepage: ""
+dev-repo: ""
+bug-reports: ""
+doc: ""
+
+build: [
+  [ "dune" "subst" ] {pinned}
+  [ "dune" "build" "-p" name "-j" jobs "--profile" "release" ]
+]
+
+depends: [
+  "dune" {build}
+  "bstruct" 
+]
