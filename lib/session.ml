@@ -88,7 +88,7 @@ module Muxer (F: Mirage_flow_lwt.S) = struct
     let open Header in 
     let header  = Packet.header frame in
 
-    if header.flag = ACK then
+    if Header.is_ack header then
       let nonce = header.len in 
       let pings = t.pending_pings in
       PromiseMap.wake_up pings nonce ();
@@ -110,75 +110,75 @@ module Muxer (F: Mirage_flow_lwt.S) = struct
       ID.is_server id
 
   
-  
+
 
   let on_window_update t frame =
+
+
     let open Entry in
     let open Option.Infix in
 
-    let flag = Packet.flag frame in
     let id = Packet.id frame in
+    let header = Packet.header frame in
 
-
-    
-    
-    match flag with
-
-    | RST ->
+    if Header.is_rst header then
+      
       let _ =
         Hashtbl.find_opt t.streams id >>> fun entry ->
-        Entry.update_state entry Closed;
-        PromiseMap.delete t.streams id;
+        let _ = Entry.update_state entry Closed in 
+        PromiseMap.delete t.streams id
       in
 
       Lwt.return ( Ok () )
 
-  
-    | FIN ->
-
+    else if Header.is_fin header then
+      
       let _ =
         Hashtbl.find_opt t.streams id >>> fun entry ->
         Entry.update_state entry RecvClosed;
       in
-     
+
       Lwt.return ( Ok () )
 
-  
-    | SYN when Hashtbl.mem t.streams id ->
-
+    else if
+      Header.is_syn header && ( Hashtbl.mem t.streams id )
+    then
+      
       let _ =
         Log.debug (fun fmt ->
             fmt "Protocol Error, stream %ld already exists" id
-        )
+          )
       in
 
 
       send_packet t (Packet.GoAway.protocol_error)
 
-    | SYN when (Hashtbl.length t.streams >= (Config.max_streams t.config) ) ->
-
+    else if
+      Header.is_syn header && (Hashtbl.length t.streams >= (Config.max_streams t.config) )
+    then
+      
       let max = Config.max_streams t.config in
       let _ = Log.debug ( fun fmt ->
           fmt "Protocol Error: maximum number of streams %d reached" max
-      ) in
+        ) in
       send_packet t (Packet.GoAway.protocol_error)
- 
-    | _ ->
-      let window = Config.recv_window t.config in
-      let credit = Packet.WindowUpdate.credit frame in
-      let s = Entry.make window credit in
 
-      Hashtbl.add t.streams id s;
+
+
+    else
+      
+      let credit = Packet.WindowUpdate.credit frame in
+      let s = Hashtbl.find t.streams id in
+      s.credit <- Int32.add s.credit credit;
       Ok () |> Lwt.return 
 
-      
-   
 
-      
-   
-    
-  
-  
+
+
+
+  let on_data t packet =
+    let header = Packet.header packet in
+    ()
       
   
 end 

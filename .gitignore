@@ -8,4 +8,4 @@
 *.install
 */.merlin
 *.swp 
-
+scrap*
