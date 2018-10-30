@@ -112,8 +112,9 @@ module Muxer (F: Mirage_flow_lwt.S) = struct
   
 
 
-  let on_window_update t frame =
 
+  let process_flags t frame f =
+    
 
     let open Entry in
     let open Option.Infix in
@@ -166,20 +167,62 @@ module Muxer (F: Mirage_flow_lwt.S) = struct
 
 
     else
-      
+      f t frame
+
+  
+
+  let on_window_update t frame =
+
+
+    let handle t frame =
+      let id = Packet.id frame in
       let credit = Packet.WindowUpdate.credit frame in
       let s = Hashtbl.find t.streams id in
       s.credit <- Int32.add s.credit credit;
-      Ok () |> Lwt.return 
+      Ok () |> Lwt.return
+
+    in process_flags t frame handle
+      
 
 
+  let reset t id =
+    let packet = Packet.data id Cstruct.empty in
+    send_packet t packet
 
 
 
   let on_data t packet =
-    let header = Packet.header packet in
-    ()
+    let open Entry in 
+
+    let aux t frame =
+      let id = Packet.id packet in
+      let len = Packet.header packet |> Header.len |> Int32.to_int in
       
+      match Hashtbl.find_opt t.streams id with
+
+      | Some stream when len > stream.window ->
+        let _ = Log.debug (fun fmt -> fmt "data frame exceeded window size") in
+        send_packet t Packet.GoAway.protocol_error
+
+      | Some stream when (Bstruct.writer_index stream.buf) >= t.config.max_buffer_size ->
+        let _ = Log.debug (fun fmt -> fmt "Cannot receive data frame" ) in
+        reset t id
+
+      | Some stream ->
+        stream.window <- stream.window - len;
+        Lwt_mutex.lock stream.lock >|= fun () ->
+        Bstruct.write_bytes stream.buf frame.body;
+        Ok ()
+
+      | None ->
+        let _ = Log.debug (fun fmt -> fmt "No such stream") in
+        send_packet t Packet.GoAway.protocol_error
+
+    in
+
+    process_flags t packet  aux 
+
+
   
 end 
 

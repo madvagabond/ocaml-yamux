@@ -31,7 +31,6 @@ let go_away code =
 let flag t = Header.flag t.header
 let id t = Header.id t.header
 
-
 let encode t =
   let buf = Cstruct.create Header.size in 
   Header.encode buf t.header;

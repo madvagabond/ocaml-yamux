@@ -4,7 +4,7 @@ type state = Open | SendClosed | RecvClosed | Closed
 
 module Entry = struct  
   type t = {
-    mutable buf: Cstruct.t;
+    mutable buf: Bstruct.t;
     lock: Lwt_mutex.t;
     mutable window: int;
     mutable credit: int32;
@@ -13,7 +13,7 @@ module Entry = struct
 
 
   let make window credit =
-    let buf = Cstruct.create 0 in
+    let buf = Bstruct.create 4096 in
     let lock = Lwt_mutex.create () in
     let state = Open in
     {buf; window; credit; lock; state}
