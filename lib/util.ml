@@ -263,3 +263,22 @@ module PromiseMap = struct
 end
 
 
+
+
+
+
+module ID = struct
+  let is_server id =
+    (id mod 2) = 0
+
+  let is_client id =
+    is_server id <> true
+
+  let is_session id =
+    id = 0l
+end 
+
+
+
+
+

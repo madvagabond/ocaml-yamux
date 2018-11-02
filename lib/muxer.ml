@@ -10,33 +10,57 @@ module Log = (val Logs.src_log src : Logs.LOG)
 
 
 
-module ID = struct
-  let is_server id =
-    (id mod 2) = 0
 
-  let is_client id =
-    is_server id <> true
 
-  let is_session id =
-    id = 0l
+
+
+module type S = sig
+  type t
+  type flow
+
+  module Flow: S.FLOW_EXT
+
+  
+
+  type write_result = (unit, Flow.write_error) result Lwt.t
+  
+  val create: flow -> Util.Config.t -> t
+  val send: t -> Packet.t -> (unit, Flow.write_error) result Lwt.t
+      
+  val flow: t -> Flow.flow
+
+  val on_window_update: t -> Packet.t -> write_result
+  val on_data: t -> Packet.t -> write_result
+  val on_ping: t -> Packet.t -> write_result
+
+
+  val process: t -> Packet.t -> write_result
+
+  
 end 
 
 
 
-module Muxer (F: Mirage_flow_lwt.S) = struct
+
+
+module Make (F: Mirage_flow_lwt.S): S = struct
 
   open Stream
   open Packet
   open Header
 
 
+  type flow = F.flow
 
+  
   module Flow = Flow_ext(F)
- 
 
+  type write_result = (unit, Flow.write_error) result Lwt.t
   
   type t = {
 
+    mutable local_closed: bool;
+    mutable remote_closed: bool; 
     lock: Lwt_mutex.t;
     flow: Flow.flow; 
     streams: (int32, Stream.Entry.t) Hashtbl.t;
@@ -47,8 +71,6 @@ module Muxer (F: Mirage_flow_lwt.S) = struct
     pending_streams: (int32, Stream.Entry.t Lwt.u) Hashtbl.t;
     pending_pings: (int32, unit Lwt.u) Hashtbl.t;
   }
-
-  
 
 
   let create conn config =
@@ -67,13 +89,21 @@ module Muxer (F: Mirage_flow_lwt.S) = struct
     {
       streams; pending_streams;
       pending_pings; lock; next_id;
+      local_closed=false; remote_closed=false;
       flow; config 
     }
 
   
+
+  let flow t = t.flow
+
+
+  
+
+
+  
     
-    
-  let send_packet t frame = 
+  let send t frame = 
     let buf = Packet.encode frame in
     Lwt_mutex.lock t.lock >>= fun () ->
     Flow.write t.flow buf >|= fun res ->
@@ -97,10 +127,14 @@ module Muxer (F: Mirage_flow_lwt.S) = struct
 
     else
       let packet = {frame with header = Header.ack header} in
-      send_packet t packet
+      send t packet
 
 
 
+
+
+
+  
 
   let valid_remote t sid =
     let id = Int32.to_int sid in 
@@ -113,9 +147,13 @@ module Muxer (F: Mirage_flow_lwt.S) = struct
 
 
 
+
+  
+
   let process_flags t frame f =
     
 
+    let open Packet in
     let open Entry in
     let open Option.Infix in
 
@@ -141,6 +179,14 @@ module Muxer (F: Mirage_flow_lwt.S) = struct
 
       Lwt.return ( Ok () )
 
+
+    else if Header.is_syn header && t.local_closed then
+     
+      let rst = WindowUpdate.make id 0l in
+      let header = Header.rst (rst.header) in
+      send t {rst with header}
+
+  
     else if
       Header.is_syn header && ( Hashtbl.mem t.streams id )
     then
@@ -150,9 +196,9 @@ module Muxer (F: Mirage_flow_lwt.S) = struct
             fmt "Protocol Error, stream %ld already exists" id
           )
       in
+      t.local_closed <- true; 
 
-
-      send_packet t (Packet.GoAway.protocol_error)
+      send t (Packet.GoAway.protocol_error)
 
     else if
       Header.is_syn header && (Hashtbl.length t.streams >= (Config.max_streams t.config) )
@@ -162,12 +208,20 @@ module Muxer (F: Mirage_flow_lwt.S) = struct
       let _ = Log.debug ( fun fmt ->
           fmt "Protocol Error: maximum number of streams %d reached" max
         ) in
-      send_packet t (Packet.GoAway.protocol_error)
+
+
+      t.local_closed <- true;
+      send t (Packet.GoAway.protocol_error)
 
 
 
     else
       f t frame
+
+
+
+
+
 
   
 
@@ -185,11 +239,20 @@ module Muxer (F: Mirage_flow_lwt.S) = struct
       
 
 
+
+
+
+  
+
   let reset t id =
     let packet = Packet.data id Cstruct.empty in
-    send_packet t packet
+    send t packet
 
 
+
+
+
+  
 
   let on_data t packet =
     let open Entry in 
@@ -202,7 +265,8 @@ module Muxer (F: Mirage_flow_lwt.S) = struct
 
       | Some stream when len > stream.window ->
         let _ = Log.debug (fun fmt -> fmt "data frame exceeded window size") in
-        send_packet t Packet.GoAway.protocol_error
+        t.local_closed <- true; 
+        send t Packet.GoAway.protocol_error
 
       | Some stream when (Bstruct.writer_index stream.buf) >= t.config.max_buffer_size ->
         let _ = Log.debug (fun fmt -> fmt "Cannot receive data frame" ) in
@@ -215,14 +279,53 @@ module Muxer (F: Mirage_flow_lwt.S) = struct
         Ok ()
 
       | None ->
-        let _ = Log.debug (fun fmt -> fmt "No such stream") in
-        send_packet t Packet.GoAway.protocol_error
+       Ok () |> Lwt.return
 
     in
 
-    process_flags t packet  aux 
+    process_flags t packet aux 
 
 
+
+  
+
+
+  
+  let on_goaway t frame =
+    let open Packet in
+    
+    let code = Packet.GoAway.code frame in
+    t.remote_closed <- true;
+
+    let _ = match code with
+    | 0x0l ->
+      Log.debug (fun fmt -> fmt "Received normal go away")
+
+    | 0x1l ->
+      Log.debug (fun fmt -> fmt "Received protocol error go away ")
+
+    | 0x2l ->
+      Log.debug (fun fmt -> fmt "Recieved internal error go away")
+
+    | x ->
+      Log.debug (fun fmt -> fmt "Received go away with error code %ld" x)
+
+    in
+    Lwt.return (Ok ())
+
+
+  
+
+  
+  let process t frame =
+    match (Packet.msg_type frame) with
+    | Data -> on_data t frame
+    | Window_Update -> on_window_update t frame
+    | Ping -> on_ping t frame
+    | Go_Away -> on_goaway t frame
+                   
+
+  
   
 end 
 
