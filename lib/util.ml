@@ -135,6 +135,10 @@ module Config = struct
 
 
   let max_streams t = t.max_streams
+
+  let window t = t.recv_window
+
+  
   let is_server t =
     t.is_client <> true
 

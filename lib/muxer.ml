@@ -36,6 +36,9 @@ module type S = sig
 
   val process: t -> Packet.t -> write_result
 
+  (*val next_id: t -> int32*)
+  
+
   
 end 
 
@@ -43,11 +46,21 @@ end
 
 
 
-module Make (F: Mirage_flow_lwt.S): S = struct
 
-  open Stream
+
+
+
+
+
+
+
+
+module Make (F: Mirage_flow_lwt.S) = struct
+
   open Packet
   open Header
+  open Stream_entry
+      
 
 
   type flow = F.flow
@@ -63,13 +76,15 @@ module Make (F: Mirage_flow_lwt.S): S = struct
     mutable remote_closed: bool; 
     lock: Lwt_mutex.t;
     flow: Flow.flow; 
-    streams: (int32, Stream.Entry.t) Hashtbl.t;
+    streams: (int32, Stream_entry.t) Hashtbl.t;
   
-    next_id: int32;
+    mutable next_id: int32;
     config: Config.t;
     
-    pending_streams: (int32, Stream.Entry.t Lwt.u) Hashtbl.t;
+    pending_streams: (int32, Stream_entry.t Lwt.u) Hashtbl.t;
     pending_pings: (int32, unit Lwt.u) Hashtbl.t;
+
+    mutable ping_id: int32
   }
 
 
@@ -90,7 +105,7 @@ module Make (F: Mirage_flow_lwt.S): S = struct
       streams; pending_streams;
       pending_pings; lock; next_id;
       local_closed=false; remote_closed=false;
-      flow; config 
+      ping_id=0l; flow; config 
     }
 
   
@@ -98,8 +113,10 @@ module Make (F: Mirage_flow_lwt.S): S = struct
   let flow t = t.flow
 
 
-  
-
+  let next_id t =
+    let id = Int32.add t.next_id 2l in
+    let _ = t.next_id <- id in
+    id
 
   
     
@@ -154,7 +171,7 @@ module Make (F: Mirage_flow_lwt.S): S = struct
     
 
     let open Packet in
-    let open Entry in
+    let open Stream_entry in
     let open Option.Infix in
 
     let id = Packet.id frame in
@@ -164,7 +181,7 @@ module Make (F: Mirage_flow_lwt.S): S = struct
       
       let _ =
         Hashtbl.find_opt t.streams id >>> fun entry ->
-        let _ = Entry.update_state entry Closed in 
+        let _ = Stream_entry.update_state entry Closed in 
         PromiseMap.delete t.streams id
       in
 
@@ -174,7 +191,7 @@ module Make (F: Mirage_flow_lwt.S): S = struct
       
       let _ =
         Hashtbl.find_opt t.streams id >>> fun entry ->
-        Entry.update_state entry RecvClosed;
+        Stream_entry.update_state entry RecvClosed;
       in
 
       Lwt.return ( Ok () )
@@ -230,9 +247,9 @@ module Make (F: Mirage_flow_lwt.S): S = struct
 
     let handle t frame =
       let id = Packet.id frame in
-      let credit = Packet.WindowUpdate.credit frame in
+      let credit = Packet.WindowUpdate.credit frame |> Int32.to_int in
       let s = Hashtbl.find t.streams id in
-      s.credit <- Int32.add s.credit credit;
+      s.credit <- s.credit + credit;
       Ok () |> Lwt.return
 
     in process_flags t frame handle
@@ -255,7 +272,7 @@ module Make (F: Mirage_flow_lwt.S): S = struct
   
 
   let on_data t packet =
-    let open Entry in 
+    let open Stream_entry in 
 
     let aux t frame =
       let id = Packet.id packet in
@@ -328,6 +345,7 @@ module Make (F: Mirage_flow_lwt.S): S = struct
   
   
 end 
+
 
 
 
