@@ -1,7 +1,7 @@
 
 type t = {header: Header.t; body: Cstruct.t}
          
-let make header = {header; body = Cstruct.empty}
+let make ?(body=Cstruct.empty) header = {header; body = Cstruct.empty}
 
 let header t = t.header
 let body t = t.body 

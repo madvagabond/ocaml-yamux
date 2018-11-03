@@ -27,7 +27,22 @@ module Flow_ext (F: Mirage_flow_lwt.S) = struct
 
   let (pp_error, pp_write_error) = F.pp_error, F.pp_write_error
 
+
+
+  let fmap_read rd f =
+    rd >>= function
+    | Ok (`Data b) -> f b
+    | Error e -> Lwt.return (Error e)
+    | Ok `Eof -> Lwt.return (Ok `Eof)
+
+
   
+  
+  let map_read rd f =
+    rd >|= function
+    | Ok (`Data b) -> Ok (`Data (f b) )
+    | Error e -> Error e
+    | Ok `Eof -> Ok `Eof
   
   
   

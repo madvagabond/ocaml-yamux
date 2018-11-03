@@ -1,6 +1,6 @@
 (library
  (name  yamux)
  (public_name yamux)
- (libraries cstruct bstruct lwt mirage-flow-lwt logs)
+ (libraries cstruct bstruct lwt mirage-flow-lwt logs mirage-time-lwt)
  (preprocess (pps cstruct.ppx))
 )
