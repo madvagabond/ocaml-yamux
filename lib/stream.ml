@@ -2,6 +2,9 @@ open Lwt.Infix
 open Util
 
 
+let src = Logs.Src.create "streams" ~doc:"Yamux Streams"
+module Log = (val Logs.src_log src : Logs.LOG)
+
 module Make (F: Mirage_flow_lwt.S) = struct
 
 
@@ -25,7 +28,11 @@ module Make (F: Mirage_flow_lwt.S) = struct
   open Mux
       
 
-  type flow = {id: int32; mux: Mux.t; entry: Stream_entry.t}
+  type flow = {
+    id: int32;
+    mux: Mux.t;
+    entry: Stream_entry.t
+  }
 
   type 'a or_eof = [
     | `Data of 'a
@@ -37,56 +44,58 @@ module Make (F: Mirage_flow_lwt.S) = struct
   
 
 
-
-  
-  let rec read_bytes flow n =
-    let len = Bstruct.readable flow.entry.buf in
-    
-    
-    match flow.entry.state with
-
-
+  let read_op t f =
+    match t.entry.state with
     | Open when flow.entry.window = 0 ->
+
       let win = flow.mux.config.recv_window in
       flow.entry.window  <- win;  
+
       let frame = Packet.window_update flow.id (Int32.of_int win) in
-      Mux.send flow.mux frame >>= fun _ -> read_bytes flow n
+      Mux.send flow.mux frame >>= fun _ ->
 
-    | Open ->
-      read_bytes flow n
-
-    
-    | _ when len >= n -> 
-      Lwt_mutex.lock flow.entry.lock >>= fun () ->  
-      let bytes = Bstruct.read_bytes flow.entry.buf n in
-      let _ = Lwt_mutex.unlock flow.entry.lock in
-      
-      Ok (`Data bytes) |> Lwt.return
+      f t.entry.buf >|= fun data ->
+      Ok (`Data data)
 
 
     | _ ->
-      Ok `Eof |> Lwt.return
+      f t.entry.buf
 
-
-
-    
-
-  
-
-  let read flow =
-    read_bytes flow 1024
+   
 
 
 
   
+      
+  let read_bytes t n =
+    AsyncBuf.get_bytes t n >|= fun buf ->
+    Ok (`Data buf)
 
+
+
+  let close flow =
+
+    let update = Packet.window_update flow.id 0l in
+    let _ = update_state flow.entry RecvClosed in
+    let _ = PromiseMap.delete flow.mux.streams flow.id in 
+    Mux.send flow.mux {update with header = (Packet.header update |> Header.ack) } >>= function
+
+
+    | Ok () -> Lwt.return_unit
+    | _ -> Lwt.return_unit 
+
+
+
+
+
+  
   let rec write flow buf =
    
     let len = Cstruct.len buf in
 
   
     match flow.entry.state with
-    | Open when len < flow.entry.credit ->
+    | Open when flow.entry.credit > len ->
       Mux.send flow.mux (Packet.data flow.id buf)
 
     | Open when flow.entry.credit > 0 ->
@@ -112,24 +121,7 @@ module Make (F: Mirage_flow_lwt.S) = struct
     | _ -> Error `Closed |> Lwt.return
 
   
-  
 
-
-
-
-  let close flow =
-  
-    let update = Packet.window_update flow.id 0l in
-    let _ = update_state flow.entry RecvClosed in
-    let _ = PromiseMap.delete flow.mux.streams flow.id in 
-    Mux.send flow.mux {update with header = (Packet.header update |> Header.ack) } >>= function
-
-
-    | Ok () -> Lwt.return_unit
-    | _ -> Lwt.return_unit 
-
-
-  
 
 
   let writev flow structs =

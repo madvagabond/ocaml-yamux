@@ -3,19 +3,23 @@ open Util
 type state = Open | SendClosed | RecvClosed | Closed
 
 type t = {
-  mutable buf: Bstruct.t;
-  lock: Lwt_mutex.t;
+
+  
+  buf: AsyncBuf.t;
   mutable window: int;
   mutable credit: int;
-  mutable state: state
+  mutable state: state;
+
 }
 
 
 let make window credit =
-  let buf = Bstruct.create 4096 in
+  let buf = AsyncBuf.create () in
   let lock = Lwt_mutex.create () in
   let state = Open in
-  {buf; window; credit; lock; state}
+  {buf; window; credit; state;}
+
+
 
 
 
@@ -45,6 +49,7 @@ let update_state t next =
 
 let state t =
   t.state
+
 
 
 

@@ -4,6 +4,12 @@ open Util
 open Stream_entry
 open Packet
 
+
+let src = Logs.Src.create "sessions" ~doc:"Yamux Session Management"
+module Log = (val Logs.src_log src : Logs.LOG)
+
+
+
 module type S = sig
   
   type t
@@ -66,20 +72,19 @@ module Make (F: Mirage_flow_lwt.S) (T: Mirage_time_lwt.S) = struct
     
     let id = Mux.next_id t in
 
-    let buf = Bstruct.create 1024 in
-    let lock = Lwt_mutex.create () in
+    let buf = AsyncBuf.create () in
     let window = Config.window t.config in
     let credit = window in
 
     let state = Open in
-    let entry = {buf; lock; window; credit; state} in
+    let entry = {buf; window; credit; state} in
 
     let stream = {id; mux=t; entry} in
 
     
     let msg =
       Packet.window_update id (Int32.of_int window) |>
-      (fun packet -> {packet with header = Header.ack packet.header} )
+      (fun packet -> {packet with header = Header.syn packet.header} )
     in
     
     Mux.send t msg >>= function
@@ -139,6 +144,7 @@ module Make (F: Mirage_flow_lwt.S) (T: Mirage_time_lwt.S) = struct
     let t = Mux.create conn conf in
     
     let rec loop () =
+      Log.info (fun fmt -> fmt "client loop running"); 
       let (p, _) = t.close in 
       Mux.read t >>= function
         
@@ -205,32 +211,36 @@ module Make (F: Mirage_flow_lwt.S) (T: Mirage_time_lwt.S) = struct
 
 
     let rec aux () =
+      let _ = Log.info (fun fmt -> fmt "listening") in
       Mux.read t >>= function 
-    
 
-        | Ok (`Data pkt) ->
 
-          let r =
-            handler pkt >>= function 
-            | Error e -> Mux.Flow.close t.flow
-            | Ok () -> aux () 
-          in 
-          
-          r
+      | Ok (`Data pkt) ->
+
+        begin 
+          handler pkt >>= function 
+          | Error e ->
+            Mux.Flow.close t.flow
+          | Ok () -> aux () 
+        end
+
+      | Ok `Eof ->
+        Mux.Flow.close t.flow
+
+
+      | Error e ->
+        Mux.Flow.close t.flow
+
+
+    in
+
+
+    aux ()
+
+
   
-        | Ok `Eof ->
-          Mux.Flow.close t.flow
 
 
-        | Error e -> Mux.Flow.close t.flow
 
-      in
-
-
-      aux () 
-
-  
-
-  
 end
 

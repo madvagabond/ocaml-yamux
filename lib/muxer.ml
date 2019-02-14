@@ -279,9 +279,7 @@ module Make (F: Mirage_flow_lwt.S) = struct
       t.local_closed <- true;
       proto_error t 
 
-
-
-    else
+    else      
       f t frame
 
 
@@ -295,14 +293,23 @@ module Make (F: Mirage_flow_lwt.S) = struct
 
 
     let handle t frame =
-      let id = Packet.id frame in
-      let credit = Packet.WindowUpdate.credit frame |> Int32.to_int in
-      let s = Hashtbl.find t.streams id in
-      s.credit <- s.credit + credit;
-      Ok None |> Lwt.return
+
+      if Header.is_syn frame.header then
+        let _ = Log.info (fun fmt -> fmt "initiating stream" ) in
+        let size = Header.len frame.header |> Int32.to_int in
+        let entry = Stream_entry.make size size in
+        let _ = Hashtbl.add t.streams (Packet.id frame) entry in
+        Ok None |> Lwt.return
+      else
+
+        let id = Packet.id frame in
+        let credit = Packet.WindowUpdate.credit frame |> Int32.to_int in
+        let s = Hashtbl.find t.streams id in
+        s.credit <- s.credit + credit;
+        Ok None |> Lwt.return
 
     in process_flags t frame handle
-      
+
 
 
 
@@ -334,7 +341,10 @@ module Make (F: Mirage_flow_lwt.S) = struct
   
 
   let on_data t packet =
-    let open Stream_entry in 
+    let open Stream_entry in
+    let open AsyncBuf in
+
+    let _ = Log.info (fun fmt -> fmt "processing data frame") in
 
     let aux t frame =
       let id = Packet.id packet in
@@ -346,16 +356,18 @@ module Make (F: Mirage_flow_lwt.S) = struct
         let _ = Log.debug (fun fmt -> fmt "data frame exceeded window size") in
         proto_error t
 
-      | Some stream when (Bstruct.writer_index stream.buf) >= t.config.max_buffer_size ->
+  (*
+      | Some stream when (Bstruct.writer_index stream.buf.buf) >= t.config.max_buffer_size ->
         let _ = Log.debug (fun fmt -> fmt "Cannot receive data frame" ) in
         reset t id >>= as_res t
 
+*)
   
       | Some stream ->
+        let _ = Log.info (fun fmt -> fmt "recieving data frame") in
         stream.window <- stream.window - len;
-        Lwt_mutex.lock stream.lock >|= fun () ->
-        Bstruct.write_bytes stream.buf frame.body;
-        Ok None
+        let _ = AsyncBuf.put stream.buf frame.body in
+        Ok None |> Lwt.return
 
       | None ->
        Ok None |> Lwt.return
@@ -415,7 +427,9 @@ module Make (F: Mirage_flow_lwt.S) = struct
   
   let process t frame =
     match (Packet.msg_type frame) with
-    | Data -> on_data t frame
+    | Data ->
+      let _ = Log.info (fun fmt -> fmt "received data packet") in
+      on_data t frame
     | Window_Update -> on_window_update t frame
     | Ping -> on_ping t frame
     | Go_Away -> on_goaway t frame

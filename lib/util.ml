@@ -1,5 +1,95 @@
 
 open Lwt.Infix
+       
+[@@@ocaml.warning "-3"]
+module Lwt_sequence = Lwt_sequence
+[@@@ocaml.warning "+3"]
+
+
+
+
+module AsyncBuf = struct
+
+  type t = {
+    writes: Cstruct.t Lwt_sequence.t;
+    reads:  (Cstruct.t Lwt.u) Lwt_sequence.t
+  }
+
+
+
+  let bufs t = Lwt_sequence.length t.writes
+  
+  let len buf =
+    Lwt_sequence.fold_l (fun b acc -> acc + (Cstruct.len b) ) buf.writes 0 
+
+  let create () =
+    let reads = Lwt_sequence.create () in
+    let writes = Lwt_sequence.create () in
+    {reads; writes}
+
+
+
+  let put t buf =
+    match Lwt_sequence.take_opt_l t.reads with
+    | Some r ->
+      Lwt.wakeup r buf
+
+    | None ->
+      Lwt_sequence.add_l buf t.writes ;
+      ()
+
+
+
+  let get t =
+    match Lwt_sequence.take_opt_l t.writes with
+
+    | Some x ->
+      Lwt.return x
+                  
+    | None ->
+      let (p, r) = Lwt.task () in 
+      Lwt_sequence.add_r r t.reads;
+      p 
+
+
+
+  let get_bytes t ct =
+    
+
+    let rec aux bufs =
+      get t >>= fun buf ->
+      let bufs1 = bufs @ [buf] in
+      let size = Cstruct.lenv bufs1 in
+      
+      if size < ct then
+        aux bufs1 
+
+      else if size = ct then
+        Cstruct.concat bufs1 |> Lwt.return 
+      else
+        
+        let diff = size - ct in
+        let (head, rem) = Cstruct.split buf diff in
+        let data = Cstruct.concat (bufs @ [head]) in
+        put t rem;
+        Lwt.return data
+
+    in
+
+
+    aux []
+        
+
+  
+
+      
+  
+
+  
+end
+
+
+
 
 
 module Flow_ext (F: Mirage_flow_lwt.S) = struct
@@ -16,7 +106,7 @@ module Flow_ext (F: Mirage_flow_lwt.S) = struct
   
   type flow = {
     flow: F.flow;
-    buf: Bstruct.t;
+    bufs: Cstruct.t Lwt_sequence.t; 
     lock: Lwt_mutex.t 
   }
 
@@ -45,61 +135,64 @@ module Flow_ext (F: Mirage_flow_lwt.S) = struct
     | Ok `Eof -> Ok `Eof
   
   
-  
+
+
+
+    
+
+    
   let read_bytes t len =
-    let present = Bstruct.readable t.buf in
 
-    let rec aux () =
-      F.read t.flow >>= function
+    let rec aux bufs =
 
-      | Ok (`Data cs) ->
-        let _ = Bstruct.write_bytes t.buf cs in
+      Lwt_sequence.take_opt_l t.bufs |> function
 
-        if (Bstruct.readable t.buf) >= len then
-          let data = `Data (Bstruct.read_bytes t.buf len) in
-          Ok data |> Lwt.return
+      | Some x when Cstruct.lenv (bufs @ [x]) >= len ->
+        let diff = (Cstruct.lenv bufs) - len in
+        let (head, rem) = Cstruct.split x diff in
+        let _ = Lwt_sequence.add_l rem t.bufs in
+        let data = Cstruct.concat (bufs @ [head]) in
+        Ok (`Data data) |> Lwt.return 
 
-        else
-          aux ()
+      | Some x when Cstruct.lenv (bufs @ [x]) < len ->
+        aux (bufs @ [x])
 
-      | Ok `Eof ->
-        let _ = Log.debug (fun fmt ->
-            fmt "remote peer closed connection before we could read %d bytes from flow" len  
-          )
-        in
+      | None ->
+        F.read t.flow >>= fun data ->
 
-        Ok `Eof |> Lwt.return
+        begin
+
+          match data with
+          | Ok (`Data buf) ->
+            let _ = Lwt_sequence.add_r buf t.bufs in
+            aux bufs 
+
+          | Ok `Eof -> Lwt.return (Ok `Eof)
+
+          | Error e -> Error e |> Lwt.return 
+        end
 
 
-      | Error e ->
-        Error e |> Lwt.return
 
     in
-
-
-    if present >= len then
-      let data = `Data (Bstruct.read_bytes t.buf len) in
-      Ok data |> Lwt.return 
-
-    else
-      Lwt_mutex.lock t.lock >>= fun () ->
-
-      let res = aux () in
-      let _ = Lwt_mutex.unlock t.lock in
-      res
+    aux []
 
 
 
   let create flow =
-    let buf = Bstruct.create 4096 in
+    let bufs = Lwt_sequence.create () in
     let lock = Lwt_mutex.create () in
-    {flow; buf; lock}
+    {flow; bufs; lock}
 
 
 
   let read t =
-    read_bytes t 1024
+    match (Lwt_sequence.take_opt_l t.bufs) with
+    | Some buf -> Ok (`Data buf) |> Lwt.return
+    | None -> F.read t.flow 
 
+
+  
   let write t buf =
     Lwt_mutex.lock t.lock >>= fun () ->
     F.write t.flow buf >|= fun res ->
