@@ -1,6 +1,7 @@
 (library
  (name  yamux)
  (public_name yamux)
- (libraries cstruct lwt mirage-flow-lwt logs mirage-time-lwt)
+ (libraries cstruct lwt mirage-flow-lwt logs lwt-queue)
+ (modules frame stream )
  (preprocess (pps cstruct.ppx))
 )
