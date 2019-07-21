@@ -1,5 +1,6 @@
 open Cstruct
 
+
 type error =
   | Too_short of int
   | Invalid_argument of string
@@ -8,17 +9,16 @@ type error =
 [%%cenum  
     type flag =
 
-      | SYN [@id 0x1]
-      | ACK [@id 0x2]
-      | FIN [@id 0x4]
-      | RST [@id 0x8]
+      | Syn [@id 0x1]
+      | Ack [@id 0x2]
+      | Fin [@id 0x4]
+      | Rst [@id 0x8]
 
       [@@uint16_t]
   ]
 
 
 let flag_of_int = int_to_flag
-
 
 
 module Flags = struct
@@ -42,6 +42,8 @@ module Flags = struct
   let union l r =
     l lor r
 
+
+  
   
 end 
 
@@ -50,9 +52,9 @@ module Type = struct
   [%%cenum 
     type t =
       | Data [@id 0x0]
-      | Window_Update [@id 0x01]
+      | Window_update [@id 0x01]
       | Ping [@id 0x2]
-      | Go_Away [@id 0x3]
+      | Go_away [@id 0x3]
       
     [@@uint8_t]
   ]
@@ -82,37 +84,68 @@ end
 type header = Cstruct.t
                 
 type t = {header: header; body: Cstruct.t}
-         
-
-let make_header ~message_type ~flags ~id ~len =
-  let header = Cstruct.create sizeof_header in
-  let _ = set_header_len header len in
-  let _ = set_header_flags header flags in
-  
-
-  let _ = set_header_mtype header (Type.to_int message_type) in
-  let _ = set_header_stream_id header id in 
-
-  let _  = set_header_version header 1 in
-  header
 
 
-let data ?flags:(flags=Flags.empty) ~id ~body =
-  let header =
-    make_header ~message_type: Data ~flags ~id ~len: (Cstruct.len body |> Int32.of_int)
-  in
 
+
+let encode_header dst msg_type flags stream_id len =
+  let _ = set_header_mtype dst msg_type in 
+  let _ = set_header_version dst 1 in
+  let _ = set_header_len dst len in
+  let _ = set_header_flags dst flags in
+  set_header_stream_id dst stream_id
+
+
+
+
+let decode_header src =
+  Cstruct.sub src 0 sizeof_header
+
+
+let body src =
+  Cstruct.sub src sizeof_header (Cstruct.len src)
+
+
+let len src =
+  get_header_len src.header
+
+
+let stream_id src =
+  get_header_stream_id src
+
+let flags src =
+  get_header_flags src
+
+
+
+
+
+
+
+let make_header msg_type flags id len =
+  let dst = Cstruct.create sizeof_header in
+  let _ = encode_header dst (Type.to_int msg_type) flags id len in
+  dst
+
+
+
+let data ?flags:(flags=Flags.empty) id body =
+  let header = make_header Type.Data flags id (Cstruct.len body |> Int32.of_int) in
   {header; body}
 
 
 
-let ping ?flags:(flags=Flags.empty) ~ping_id =
+  
 
+
+let ping ?flags:(flags=Flags.empty) id =
+
+  let open Type in 
   let header = make_header
-      ~message_type: Ping
-      ~flags
-      ~id: 0l
-      ~len: ping_id  
+      Ping
+      flags
+      0l 
+      id  
   in
 
   let body = Cstruct.empty in
@@ -120,12 +153,13 @@ let ping ?flags:(flags=Flags.empty) ~ping_id =
   {header; body}
 
 
-let go_away ~code =
+let go_away code =
+  let open Type in 
   let header = make_header 
-      ~message_type: Go_Away
-      ~flags: Flags.empty 
-      ~id: 0l
-      ~len: code
+      Go_away
+      Flags.empty 
+      0l
+      code
 
   in
 
@@ -133,12 +167,12 @@ let go_away ~code =
 
 
 
-let window_update ?flags:(flags=Flags.empty) ~id ~credit =
+let window_update ?flags:(flags=Flags.empty) id credit =
   let header = make_header
-      ~message_type: Window_Update
-      ~flags
-      ~id
-      ~len: credit
+      Window_update
+      flags
+      id
+      credit
   in
 
   let body = Cstruct.empty in
@@ -147,9 +181,9 @@ let window_update ?flags:(flags=Flags.empty) ~id ~credit =
 
 
 
-let packet_type t =
+let frame_type t =
   match (get_header_mtype t.header |> Type.of_int ) with
-  | Some(x) -> x
+  | Some x  -> x
   | None -> raise (Invalid_argument "No such packet type")
 
 
@@ -167,12 +201,6 @@ let length t =
 let body t =
   t.body
 
+let header t = t.header
 
 
-let decode buf =
-  let (header, body) = Cstruct.split buf sizeof_header in
-  {header; body}
-
-
-let encode t =
-  Cstruct.append t.header t.body 
