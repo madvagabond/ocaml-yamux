@@ -52,3 +52,12 @@ let make send_window recv_window =
     rx;
     tx;
   }
+
+
+
+let saturating_sub l r =
+  let i = Int32.sub l r in
+
+  if i >= 0l then i
+  else 0l
+    
