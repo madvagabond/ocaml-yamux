@@ -25,6 +25,8 @@ module Make (F: Mirage_flow_lwt.S) = struct
   type t = {
     transport: Transport.t;
     streams: (int32, Stream.stream) Hashtbl.t;
+
+    mutable ping_id: int32;
     config: Config.t;
 
     
@@ -274,8 +276,23 @@ module Make (F: Mirage_flow_lwt.S) = struct
 
 
 
+ 
+
+
+  let ping t =
+    let (p, u) = Lwt.task () in
+    let ping_id = Int32.add t.ping_id 1l in
+    let _ = t.ping_id <- ping_id in
+    
+    let frame = Frame.ping ping_id in
+    let _ = Hashtbl.add t.pings ping_id u in
+    let _ = Lwt_queue.offer t.out frame in
+    
+    p
   
 
+
+  
   
       
 
