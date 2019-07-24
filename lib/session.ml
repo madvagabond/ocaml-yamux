@@ -20,13 +20,24 @@ module Make (F: Mirage_flow_lwt.S) = struct
   
   module Transport = Mirage_codec.Make(F)(Codec)
 
-  
-      
-  type t = {
-    transport: Transport.t;
-    streams: (int32, Stream.stream) Hashtbl.t;
 
+  type transition = Close  | Continue | Go_away
+
+
+  
+  
+
+  type t = {
+
+    mutable closed: bool; 
+    transport: Transport.t;
+    
+    streams: (int32, Stream.stream) Hashtbl.t;
+    
     mutable ping_id: int32;
+    mutable stream_id: int32;
+
+    
     config: Config.t;
 
     
@@ -34,11 +45,6 @@ module Make (F: Mirage_flow_lwt.S) = struct
 
     out: Frame.t Lwt_queue.t;
     incoming: Stream.stream Lwt_queue.t;
-
-    
-    pending_streams: (int32, Stream.stream Lwt.u) Hashtbl.t; 
-    close_r: unit Lwt.u;
-    close_p: unit Lwt.t 
   }
 
 
@@ -56,10 +62,13 @@ module Make (F: Mirage_flow_lwt.S) = struct
 
     let wake_ping () =
       let ping_id = Frame.length frame in
-      Hashtbl.find_opt t.pings ping_id |> function
+      
+      let _ = Hashtbl.find_opt t.pings ping_id |> function
+        | Some r  -> Lwt.wakeup_later r ()
+        | None -> ()
+      in
 
-      | Some r  -> Lwt.wakeup_later r ()
-      | None -> () 
+      Continue 
     in 
 
 
@@ -74,20 +83,18 @@ module Make (F: Mirage_flow_lwt.S) = struct
       let frame = Frame.ping ~flags id in
       let _ = Lwt_queue.offer t.out frame in
 
-      ()
+      Continue 
     in
      
 
     if has flags Ack then
       wake_ping ()
         
-    else if has flags Syn then
+    else
       reply ()
 
-    else
-      ()
 
-
+  
 
 
 
@@ -102,18 +109,33 @@ module Make (F: Mirage_flow_lwt.S) = struct
 
 
 
+
+  (**
+    flag behavior:  
+      
+      syn: 
+      if the stream frame.id doesn't exist create the stream with window sizes as frame.length
+      if the stream id exists send a go_away with the protocol error code and shutdown 
+     
+      fin: 
+       close the stream  
+
+      
+      
+    operations 
+      syn flag -> check fin -> done     
+    
+
+      standard behavior if a go_away has not been sent then shutdown 
+       
+  *)
+
+  
   let handle_window_update t frame =
 
     let open Frame in
     let open Flags in
     let open Stream in 
-
-
-    let send_go_away () =
-      let frame = Frame.go_away 1l in
-      let _ = Lwt_queue.offer t.out frame in
-      Error frame  
-    in
 
 
     let on_fin stream =
@@ -128,16 +150,19 @@ module Make (F: Mirage_flow_lwt.S) = struct
     let on_syn () =
 
       if Hashtbl.mem t.streams id then
-        send_go_away ()
+        let _ = Logs.err ~src (fun m -> m "Cannot create stream %ld because it already exists, shutting down transport" id) in
+        Go_away
 
       else if (Config.max_streams t.config) >= (Hashtbl.length t.streams) then
-        send_go_away ()
+        let _ = Logs.err ~src (fun m -> m "Maximum stream capacity met, cannot allocate more, shutting down transport.") in 
+        Go_away
 
       else
 
+        let _ = Logs.debug ~src (fun m -> m "Creating new stream %ld" id) in
 
         let stream =
-          Stream.make Config.default_recv_window (Frame.length frame)
+          Stream.make Config.default_recv_window (Frame.length frame) id t.out
         in
 
 
@@ -145,12 +170,12 @@ module Make (F: Mirage_flow_lwt.S) = struct
 
         let _ = Lwt_queue.offer t.incoming stream in
         let _ = Hashtbl.add t.streams id stream in
-        Ok ()
-
-
+        Continue
     in
 
 
+
+    
 
 
 
@@ -161,10 +186,13 @@ module Make (F: Mirage_flow_lwt.S) = struct
       Hashtbl.find_opt t.streams id  |> function
       | Some s ->
         let _ = s.send_window <- Int32.add s.send_window (Frame.length frame) in
-        Ok ()
+        Continue 
 
       | None ->
-        Ok ()
+        Continue
+
+
+  
 
 
   
@@ -179,12 +207,6 @@ module Make (F: Mirage_flow_lwt.S) = struct
     let open Flags in
     let open Stream in 
 
-
-    let send_go_away () =
-      let frame = Frame.go_away 1l in
-      let _ = Lwt_queue.offer t.out frame in
-      Error frame  
-    in
 
 
     let on_fin stream =
@@ -205,7 +227,8 @@ module Make (F: Mirage_flow_lwt.S) = struct
         let _ = Lwt_queue.offer stream.rx (Frame.body frame) in
         let _ = on_fin stream in
 
-        Ok ()
+
+        Continue 
       in
       
 
@@ -213,11 +236,8 @@ module Make (F: Mirage_flow_lwt.S) = struct
       match (Hashtbl.find_opt t.streams id) with
       | Some s -> f s    
 
-      | None -> Ok ()
-
+      | None -> Continue 
     in
-    
-
 
     
 
@@ -226,16 +246,15 @@ module Make (F: Mirage_flow_lwt.S) = struct
     let on_syn () =
 
       if Hashtbl.mem t.streams id then
-        send_go_away ()
+        Go_away
 
       else if (Config.max_streams t.config) >= (Hashtbl.length t.streams) then
-        send_go_away ()
-
+        Go_away 
       else
 
 
         let stream =
-          Stream.make Config.default_recv_window Config.default_recv_window
+          Stream.make Config.default_recv_window Config.default_recv_window id t.out
         in
 
 
@@ -264,10 +283,11 @@ module Make (F: Mirage_flow_lwt.S) = struct
   
 
   let shutdown t =
-    let _ = Lwt.wakeup_later t.close_r () in
-    t.close_p
+    let _ = t.closed <- true in
+    Lwt.return_unit 
 
 
+  
   
 
 
@@ -292,7 +312,172 @@ module Make (F: Mirage_flow_lwt.S) = struct
   
 
 
+
   
+  
+  let open_substream t =
+    let open Frame in
+    let open Flags in
+    
+    let id = Int32.add t.stream_id 2l in
+    let flags = flag_to_int Syn in
+    let frame = Frame.window_update ~flags (Config.recv_window t.config) id in
+
+    let size = Config.recv_window t.config in
+    let stream = Stream.make size size id t.out in
+
+    let _= t.stream_id <- id in 
+    let _ = Lwt_queue.offer t.out frame in
+    Lwt.return stream
+
+
+
+
+
+  
+    
+
+
+
+  let handle_frame t frame =
+    let open Frame in
+    match (Frame.frame_type frame) with
+    | Data -> handle_data t frame
+    | Window_update -> handle_window_update t frame
+    | Ping -> handle_ping t frame
+    | Go_away -> Close
+  
+
+  let read_loop t =
+      
+
+    let handle_message =
+      let open Transport in 
+      function
+      | Ok (Data msg) -> handle_frame t msg
+      | Ok Eof -> Close
+      | Error e -> Go_away
+  in 
+
+  
+
+  let rec aux () =
+
+    let send_go_away () =
+      let frame = Frame.go_away 1l in 
+      let _ = Lwt_queue.offer t.out frame in
+      let _ = Lwt_queue.close t.out in
+      Lwt.return_unit 
+    in
+
+    
+
+    
+    
+    let handle_transition out =
+
+      match out with
+      | Close -> shutdown t 
+      | Continue -> aux ()
+      | Go_away ->  send_go_away () 
+
+    in
+
+    let step res = handle_message res |> handle_transition in
+    
+
+      if t.closed then Lwt.return_unit
+      else
+        Transport.read t.transport >>= step 
+    in
+
+    
+    aux ()
+
+
+
+
+
+
+  
+  let write_loop t =
+
+
+
+    let on_goaway frame =
+      Transport.write t.transport frame >>= fun _ ->
+      shutdown t
+    in
+    
+
+
+  
+  
+        
+    let rec aux () =
+
+
+      let send frame =
+        Transport.write t.transport frame >>= function 
+        | Ok () -> aux ()
+        | Error _ -> shutdown t
+      in
+
+      
+      let step frame =
+        let open Frame in 
+        match Frame.frame_type frame with
+
+        | Go_away -> on_goaway frame
+        | _ -> send frame
+
+      in
+      
+      if t.closed then
+        Lwt.return_unit
+      else
+        Lwt_queue.poll t.out >>= fun frame -> 
+        step frame 
+
+
+    in
+
+
+    
+    aux ()
+
+
+
+
+ 
+
+
+  let make flow config =
+    let open Config in
+    
+    let stream_id =
+      match config.mode with
+      | Client -> 1l
+      | Server -> 2l
+    in
+
+    let transport = Transport.make flow in
+    let streams = Hashtbl.create config.max_streams in
+    let ping_id = 0l in
+
+    let out = Lwt_queue.unbounded () in
+    let incoming = Lwt_queue.unbounded () in
+    let pings = Hashtbl.create 65000 in
+    let closed = false in 
+
+    let t = {closed; transport; streams; ping_id; stream_id; config; pings; out; incoming;} in
+
+    let _ = Lwt.async (fun () -> read_loop t) in
+    let _ = Lwt.async (fun () -> write_loop t) in
+
+    t 
+    
+    
   
       
 
