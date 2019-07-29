@@ -2,7 +2,6 @@ open Lwt.Infix
 open Stream 
 open Config
 
-type session_type = Server | Client
 
 let src = Logs.Src.create "sessions" ~doc:"Yamux Session Management"
 module Log = (val Logs.src_log src : Logs.LOG)
@@ -102,6 +101,52 @@ module Make (F: Mirage_flow_lwt.S) = struct
 
 
 
+  let on_fin frame stream =
+
+    let open Frame in 
+    if Flags.has (Frame.flags frame) Fin then
+      Stream.update_status stream Stream.RecvClosed
+              
+
+
+
+  let on_syn t frame f =
+    let open Frame in
+    let open Stream in
+
+    let id = Frame.stream_id frame in
+
+
+
+
+    if Hashtbl.mem t.streams id then
+      
+      let _ = Logs.err ~src (fun m ->
+          m "Cannot create stream %ld because it already exists, shutting down transport" id
+        )
+      in
+      Go_away
+
+    else if (Config.max_streams t.config) <= (Hashtbl.length t.streams) then
+      
+      let _ = Logs.err ~src (fun m -> m "Maximum stream capacity met, cannot allocate more, shutting down transport.") in 
+      Go_away
+
+    else
+
+      let _ = Logs.info ~src (fun m -> m "Creating new stream %ld" id) in
+
+      let stream =
+        f () 
+      in
+
+
+      let _ = on_fin frame stream in 
+
+      let _ = Lwt_queue.offer t.incoming stream in
+      let _ = Hashtbl.add t.streams id stream in
+      Continue
+
 
 
 
@@ -137,61 +182,29 @@ module Make (F: Mirage_flow_lwt.S) = struct
     let open Flags in
     let open Stream in 
 
-
-    let on_fin stream =
-      if has (Frame.flags frame) Fin then
-        Stream.update_status stream Stream.RecvClosed
-    in
-
     
     let id = Frame.stream_id frame in
-    
 
-    let on_syn () =
-
-      if Hashtbl.mem t.streams id then
-        let _ = Logs.err ~src (fun m -> m "Cannot create stream %ld because it already exists, shutting down transport" id) in
-        Go_away
-
-      else if (Config.max_streams t.config) >= (Hashtbl.length t.streams) then
-        let _ = Logs.err ~src (fun m -> m "Maximum stream capacity met, cannot allocate more, shutting down transport.") in 
-        Go_away
-
-      else
-
-        let _ = Logs.debug ~src (fun m -> m "Creating new stream %ld" id) in
-
-        let stream =
-          Stream.make Config.default_recv_window (Frame.length frame) id t.out
-        in
-
-
-        let _ = on_fin stream in 
-
-        let _ = Lwt_queue.offer t.incoming stream in
-        let _ = Hashtbl.add t.streams id stream in
-        Continue
+    let make_stream () =
+      Stream.make Config.default_recv_window (Frame.length frame) id t.out
     in
-
-
-
     
-
 
 
     if has (Frame.flags frame) Syn then
-      on_syn ()
+      on_syn t frame make_stream
   
     else
       Hashtbl.find_opt t.streams id  |> function
       | Some s ->
-        let _ = s.send_window <- Int32.add s.send_window (Frame.length frame) in
+        let _ = Stream.update_window s (Frame.length frame) in
         Continue 
 
       | None ->
         Continue
 
 
+  
   
 
 
@@ -208,6 +221,8 @@ module Make (F: Mirage_flow_lwt.S) = struct
     let open Stream in 
 
 
+
+    let _ = Logs.info ~src (fun m -> m "receiving data packet") in
 
     let on_fin stream =
       if has (Frame.flags frame) Fin then
@@ -234,44 +249,29 @@ module Make (F: Mirage_flow_lwt.S) = struct
 
         
       match (Hashtbl.find_opt t.streams id) with
-      | Some s -> f s    
+      | Some s ->
+        f s    
 
-      | None -> Continue 
+      | None ->
+        Continue 
     in
-
-    
-
-    
-
-    let on_syn () =
-
-      if Hashtbl.mem t.streams id then
-        Go_away
-
-      else if (Config.max_streams t.config) >= (Hashtbl.length t.streams) then
-        Go_away 
-      else
-
-
-        let stream =
-          Stream.make Config.default_recv_window Config.default_recv_window id t.out
-        in
-
-
-        let _ = on_fin stream in 
-
-        let _ = Lwt_queue.offer t.incoming stream in
-        let _ = Hashtbl.add t.streams id stream in
-        notify_substream () 
-    in
-
-
+  
 
     if has (Frame.flags frame) Syn then
-      on_syn ()
+      let init_stream () =
+        Stream.make Config.default_recv_window Config.default_recv_window id t.out
+      in
+      
+      on_syn t frame init_stream |> function
+      | Continue -> notify_substream ()                  
+      | state -> state
+
+  
     else
       notify_substream () 
-      
+
+
+  
 
 
 
@@ -315,16 +315,18 @@ module Make (F: Mirage_flow_lwt.S) = struct
 
   
   
-  let open_substream t =
+  let open_stream t =
     let open Frame in
     let open Flags in
     
     let id = Int32.add t.stream_id 2l in
     let flags = flag_to_int Syn in
-    let frame = Frame.window_update ~flags (Config.recv_window t.config) id in
+    let frame = Frame.window_update ~flags id (Config.recv_window t.config) in
 
     let size = Config.recv_window t.config in
     let stream = Stream.make size size id t.out in
+    let _ = Hashtbl.add t.streams id stream in
+    
 
     let _= t.stream_id <- id in 
     let _ = Lwt_queue.offer t.out frame in
@@ -348,6 +350,9 @@ module Make (F: Mirage_flow_lwt.S) = struct
     | Go_away -> Close
   
 
+
+
+  
   let read_loop t =
       
 
@@ -451,6 +456,7 @@ module Make (F: Mirage_flow_lwt.S) = struct
 
  
 
+  
 
   let make flow config =
     let open Config in

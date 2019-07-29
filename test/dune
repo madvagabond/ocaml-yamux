@@ -1,16 +1,20 @@
 
-;(executable
+(executable
+ (name  yamux_test)
+ (public_name yamux_test)
+  
+ (libraries yamux alcotest-lwt mirage-flow-unix logs logs.fmt)
 
- ;(name yamux_test)
- ;(public_name yamux_test)
- ;(libraries yamux alcotest-lwt lwt-queue mirage-time-unix logs.fmt)
+  
+)
 
 
-;)
 
 
-;(alias
 
- ;(name runtest)
- ;(action (run %{exe:yamux_test.exe} ) )
-;)
+(alias
+
+ (name runtest)
+ (action (run %{exe:yamux_test.exe} ) )
+
+)
